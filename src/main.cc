@@ -46,8 +46,12 @@ struct {
     StringView notes;
 } constexpr version_notes[] = { {
         0,
+        "» asynchronous {+u}shell-script-candidates{} completion\n"
+        "» {+b}%val\\{window_range}{} is now emitted as separate strings\n"
         "» {+b}+{} only duplicates identical selections a single time\n"
         "» {+u}daemonize-session{} command\n"
+        "» view mode and mouse scrolling no longer change selections\n"
+        "» {+u}git apply/edit/grep{} commands\n"
     }, {
         20230805,
         "» Fix FreeBSD/MacOS clang compilation\n"
@@ -226,7 +230,7 @@ static const EnvVarDesc builtin_env_vars[] = { {
     }, {
         "buflist", false,
         [](StringView name, const Context& context) -> Vector<String>
-        { return BufferManager::instance() | transform(&Buffer::display_name) | gather<Vector>(); }
+        { return BufferManager::instance() | transform(&Buffer::display_name) | gather<Vector<String>>(); }
     }, {
         "buf_line_count", false,
         [](StringView name, const Context& context) -> Vector<String>
@@ -294,7 +298,7 @@ static const EnvVarDesc builtin_env_vars[] = { {
         [](StringView name, const Context& context) -> Vector<String>
         { return ClientManager::instance() |
                       transform([](const std::unique_ptr<Client>& c) -> const String&
-                                { return c->context().name(); }) | gather<Vector>(); }
+                                { return c->context().name(); }) | gather<Vector<String>>(); }
     }, {
         "modified", false,
         [](StringView name, const Context& context) -> Vector<String>
@@ -340,21 +344,21 @@ static const EnvVarDesc builtin_env_vars[] = { {
         { return main_sel_first(context.selections()) |
                      transform([&buffer=context.buffer()](const Selection& sel) {
                          return selection_to_string(ColumnType::Byte, buffer, sel);
-                     }) | gather<Vector>(); }
+                     }) | gather<Vector<String>>(); }
     }, {
         "selections_char_desc", false,
         [](StringView name, const Context& context) -> Vector<String>
         { return main_sel_first(context.selections()) |
                      transform([&buffer=context.buffer()](const Selection& sel) {
                          return selection_to_string(ColumnType::Codepoint, buffer, sel);
-                     }) | gather<Vector>(); }
+                     }) | gather<Vector<String>>(); }
     }, {
         "selections_display_column_desc", false,
         [](StringView name, const Context& context) -> Vector<String>
         { return main_sel_first(context.selections()) |
                      transform([&buffer=context.buffer(), tabstop=context.options()["tabstop"].get<int>()](const Selection& sel) {
                          return selection_to_string(ColumnType::DisplayColumn, buffer, sel, tabstop);
-                     }) | gather<Vector>(); }
+                     }) | gather<Vector<String>>(); }
     }, {
         "selection_length", false,
         [](StringView name, const Context& context) -> Vector<String>
@@ -387,8 +391,8 @@ static const EnvVarDesc builtin_env_vars[] = { {
         [](StringView name, const Context& context) -> Vector<String>
         {
             const auto& setup = context.window().last_display_setup();
-            return {format("{} {} {} {}", setup.first_line, setup.first_column,
-                                          setup.line_count, 0)};
+            return {to_string(setup.first_line), to_string(setup.first_column),
+                    to_string(setup.line_count), to_string(0)};
         }
     }, {
         "history", false,

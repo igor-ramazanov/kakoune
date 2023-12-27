@@ -16,7 +16,6 @@ public:
     explicit Regex(StringView re, RegexCompileFlags flags = RegexCompileFlags::None);
     bool empty() const { return m_str.empty(); }
     bool operator==(const Regex& other) const { return m_str == other.m_str; }
-    bool operator!=(const Regex& other) const { return m_str != other.m_str; }
 
     const String& str() const { return m_str; }
 
@@ -61,8 +60,7 @@ struct MatchResults
         iterator& operator++() { m_it += 2; return *this; }
         SubMatch operator*() const { return {*m_it, *(m_it+1)}; }
 
-        friend bool operator==(const iterator& lhs, const iterator& rhs) { return lhs.m_it == rhs.m_it; }
-        friend bool operator!=(const iterator& lhs, const iterator& rhs) { return lhs.m_it != rhs.m_it; }
+        friend bool operator==(const iterator& lhs, const iterator& rhs) = default;
     private:
 
         It m_it;
@@ -85,15 +83,7 @@ struct MatchResults
             SubMatch{m_values[i*2], m_values[i*2+1]} : SubMatch{};
     }
 
-    friend bool operator==(const MatchResults& lhs, const MatchResults& rhs)
-    {
-        return lhs.m_values == rhs.m_values;
-    }
-
-    friend bool operator!=(const MatchResults& lhs, const MatchResults& rhs)
-    {
-        return not (lhs == rhs);
-    }
+    friend bool operator==(const MatchResults& lhs, const MatchResults& rhs) = default;
 
     void swap(MatchResults& other)
     {
@@ -172,7 +162,8 @@ bool backward_regex_search(It begin, It end, It subject_begin, It subject_end,
     return regex_search<It, RegexMode::Backward>(begin, end, subject_begin, subject_end, res, re, flags, idle_func);
 }
 
-String option_to_string(const Regex& re);
+enum class Quoting;
+String option_to_string(const Regex& re, Quoting quoting);
 Regex option_from_string(Meta::Type<Regex>, StringView str);
 
 template<typename Iterator, RegexMode mode = RegexMode::Forward,
@@ -192,7 +183,6 @@ struct RegexIterator
 
         It& operator++() { m_valid = m_base.next(); return *this; }
         bool operator==(Sentinel) const { return not m_valid; }
-        bool operator!=(Sentinel) const { return m_valid; }
 
         RegexIterator& m_base;
         bool m_valid;

@@ -91,13 +91,15 @@ static Optional<SubseqRes> subsequence_match_smart_case(StringView str, StringVi
         if (it == str.end())
             return {};
         const Codepoint c = utf8::read_codepoint(subseq_it, subseq.end());
+        if (single_word and not is_word(c))
+            single_word = false;
         while (true)
         {
             auto str_c = utf8::read_codepoint(it, str.end());
             if (smartcase_eq(str_c, c))
                 break;
 
-            if (max_index != -1 and single_word and  not is_word(str_c))
+            if (max_index != -1 and single_word and not is_word(str_c))
                 single_word = false;
 
             ++index;
@@ -135,14 +137,24 @@ RankedMatch::RankedMatch(StringView candidate, StringView query, TestFunc func)
 
     if (res->single_word)
         m_flags |= Flags::SingleWord;
-    if (smartcase_eq(candidate[0], query[0]))
-        m_flags |= Flags::FirstCharMatch;
+
+    if (auto it = find(candidate | reverse() | skip(1), '/').base();
+        it == candidate.begin() or subsequence_match_smart_case({it, candidate.end()}, query))
+    {
+        m_flags |= Flags::BaseName;
+        if ((candidate.end() - it) >= query.length() and
+            std::equal(Utf8It{query.begin(), query}, Utf8It{query.end(), query}, Utf8It{it, candidate},
+                       [](Codepoint query, Codepoint candidate) { return smartcase_eq(candidate, query); }))
+            m_flags |= Flags::Prefix;
+    }
 
     auto it = std::search(candidate.begin(), candidate.end(),
                           query.begin(), query.end(), smartcase_eq);
     if (it != candidate.end())
     {
         m_flags |= Flags::Contiguous;
+        if (std::all_of(Utf8It{query.begin(), query}, Utf8It{query.end(), query}, [](auto cp) { return is_word(cp); }))
+            m_flags |= Flags::SingleWord;
         if (it == candidate.begin())
         {
             m_flags |= Flags::Prefix;
@@ -175,8 +187,8 @@ RankedMatch::RankedMatch(StringView candidate, StringView query)
 
 static bool is_word_boundary(Codepoint prev, Codepoint c)
 {
-    return (iswalnum((wchar_t)prev)) != iswalnum((wchar_t)c) or
-           (iswlower((wchar_t)prev) != iswlower((wchar_t)c));
+    return (is_word(prev, {})) != is_word(c, {}) or
+           (is_lower(prev) != is_lower(c));
 }
 
 bool RankedMatch::operator<(const RankedMatch& other) const
@@ -188,14 +200,17 @@ bool RankedMatch::operator<(const RankedMatch& other) const
     if (diff != Flags::None)
         return (int)(m_flags & diff) > (int)(other.m_flags & diff);
 
-    // If we are SingleWord, FirstCharMatch will do the job, and we dont want to take
-    // other words boundaries into account.
+    // If we are SingleWord, we dont want to take word boundaries from other
+    // words into account.
     if (not (m_flags & (Flags::Prefix | Flags::SingleWord)) and
         m_word_boundary_match_count != other.m_word_boundary_match_count)
         return m_word_boundary_match_count > other.m_word_boundary_match_count;
 
     if (m_max_index != other.m_max_index)
         return m_max_index < other.m_max_index;
+
+    if (m_input_sequence_number != other.m_input_sequence_number)
+        return m_input_sequence_number < other.m_input_sequence_number;
 
     // Reorder codepoints to improve matching behaviour
     auto order = [](Codepoint cp) { return cp == '/' ? 0 : cp; };
@@ -228,8 +243,8 @@ bool RankedMatch::operator<(const RankedMatch& other) const
             if (is_wb1 != is_wb2)
                 return is_wb1;
 
-            const bool low1 = iswlower((wchar_t)cp1);
-            const bool low2 = iswlower((wchar_t)cp2);
+            const bool low1 = is_lower(cp1);
+            const bool low2 = is_lower(cp2);
             if (low1 != low2)
                 return low1;
 
@@ -240,27 +255,38 @@ bool RankedMatch::operator<(const RankedMatch& other) const
 }
 
 UnitTest test_ranked_match{[] {
+    auto preferred = [](StringView query, StringView better, StringView worse) {
+        return RankedMatch{better, query} < RankedMatch{worse, query};
+    };
+
     kak_assert(count_word_boundaries_match("run_all_tests", "rat") == 3);
     kak_assert(count_word_boundaries_match("run_all_tests", "at") == 2);
     kak_assert(count_word_boundaries_match("countWordBoundariesMatch", "wm") == 2);
     kak_assert(count_word_boundaries_match("countWordBoundariesMatch", "cobm") == 3);
     kak_assert(count_word_boundaries_match("countWordBoundariesMatch", "cWBM") == 4);
-    kak_assert(RankedMatch{"source", "so"} < RankedMatch{"source_data", "so"});
-    kak_assert(not (RankedMatch{"source_data", "so"} < RankedMatch{"source", "so"}));
-    kak_assert(not (RankedMatch{"source", "so"} < RankedMatch{"source", "so"}));
-    kak_assert(RankedMatch{"single/word", "wo"} < RankedMatch{"multiw/ord", "wo"});
-    kak_assert(RankedMatch{"foo/bar/foobar", "foobar"} < RankedMatch{"foo/bar/baz", "foobar"});
-    kak_assert(RankedMatch{"delete-buffer", "db"} < RankedMatch{"debug", "db"});
-    kak_assert(RankedMatch{"create_task", "ct"} < RankedMatch{"constructor", "ct"});
-    kak_assert(RankedMatch{"class", "cla"} < RankedMatch{"class::attr", "cla"});
-    kak_assert(RankedMatch{"meta/", "meta"} < RankedMatch{"meta-a/", "meta"});
-    kak_assert(RankedMatch{"find(1p)", "find"} < RankedMatch{"findfs(8)", "find"});
-    kak_assert(RankedMatch{"find(1p)", "fin"} < RankedMatch{"findfs(8)", "fin"});
-    kak_assert(RankedMatch{"sys_find(1p)", "sys_find"} < RankedMatch{"sys_findfs(8)", "sys_find"});
-    kak_assert(RankedMatch{"init", ""} < RankedMatch{"__init__", ""});
-    kak_assert(RankedMatch{"init", "ini"} < RankedMatch{"__init__", "ini"});
-    kak_assert(RankedMatch{"a", ""} < RankedMatch{"b", ""});
-    kak_assert(RankedMatch{"expresions", "expresins"} < RankedMatch{"expressionism's", "expresins"});
+    kak_assert(preferred("so", "source", "source_data"));
+    kak_assert(not preferred("so", "source_data", "source"));
+    kak_assert(not preferred("so", "source", "source"));
+    kak_assert(preferred("wo", "single/word", "multiw/ord"));
+    kak_assert(preferred("foobar", "foo/bar/foobar", "foo/bar/baz"));
+    kak_assert(preferred("db", "delete-buffer", "debug"));
+    kak_assert(preferred("ct", "create_task", "constructor"));
+    kak_assert(preferred("cla", "class", "class::attr"));
+    kak_assert(preferred("meta", "meta/", "meta-a/"));
+    kak_assert(preferred("find", "find(1p)", "findfs(8)"));
+    kak_assert(preferred("fin", "find(1p)", "findfs(8)"));
+    kak_assert(preferred("sys_find", "sys_find(1p)", "sys_findfs(8)"));
+    kak_assert(preferred("", "init", "__init__"));
+    kak_assert(preferred("ini", "init", "__init__"));
+    kak_assert(preferred("", "a", "b"));
+    kak_assert(preferred("expresins", "expresions", "expressionism's"));
+    kak_assert(preferred("foo_b", "foo/bar/foo_bar.baz", "test/test_foo_bar.baz"));
+    kak_assert(preferred("foo_b", "bar/bar_qux/foo_bar.baz", "foo/test_foo_bar.baz"));
+    kak_assert(preferred("foo_bar", "bar/foo_bar.baz", "foo_bar/qux.baz"));
+    kak_assert(preferred("fb", "foo_bar/", "foo.bar"));
+    kak_assert(preferred("foo_bar", "test_foo_bar", "foo_test_bar"));
+    kak_assert(preferred("rm.cc", "src/ranked_match.cc", "test/README.asciidoc"));
+    kak_assert(preferred("luaremote", "src/script/LuaRemote.cpp", "tests/TestLuaRemote.cpp"));
 }};
 
 UnitTest test_used_letters{[]()

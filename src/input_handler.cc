@@ -34,8 +34,10 @@ public:
     void handle_key(Key key, bool synthesized) { RefPtr<InputMode> keep_alive{this}; on_key(key, synthesized); }
     virtual void paste(StringView content);
 
-    virtual void on_enabled() {}
-    virtual void on_disabled(bool temporary) {}
+    virtual void on_enabled(bool from_pop) {}
+    virtual void on_disabled(bool from_push) {}
+
+    virtual void refresh_ifn() {}
 
     bool enabled() const { return &m_input_handler.current_mode() == this; }
     Context& context() const { return m_input_handler.context(); }
@@ -227,7 +229,7 @@ public:
           m_state(single_command ? State::SingleCommand : State::Normal)
     {}
 
-    void on_enabled() override
+    void on_enabled(bool from_pop) override
     {
         if (m_state == State::PopOnEnabled)
             return pop_mode();
@@ -248,12 +250,12 @@ public:
         }
     }
 
-    void on_disabled(bool temporary) override
+    void on_disabled(bool from_push) override
     {
         m_idle_timer.disable();
         m_fs_check_timer.disable();
 
-        if (not temporary and m_hooks_disabled)
+        if (not from_push and m_hooks_disabled)
         {
             context().hooks_disabled().unset();
             m_hooks_disabled = false;
@@ -630,143 +632,6 @@ private:
     const FaceRegistry& m_faces;
 };
 
-class Menu : public InputMode
-{
-public:
-    Menu(InputHandler& input_handler, Vector<DisplayLine> choices,
-         MenuCallback callback)
-        : InputMode(input_handler),
-          m_callback(std::move(callback)), m_choices(choices.begin(), choices.end()),
-          m_selected(m_choices.begin()),
-          m_filter_editor{context().faces()}
-    {
-        if (not context().has_client())
-            return;
-        context().client().menu_show(std::move(choices), {}, MenuStyle::Prompt);
-        context().client().menu_select(0);
-    }
-
-    void on_key(Key key, bool) override
-    {
-        auto match_filter = [this](const DisplayLine& choice) {
-            for (auto& atom : choice)
-            {
-                const auto& contents = atom.content();
-                if (regex_match(contents.begin(), contents.end(), m_filter))
-                    return true;
-            }
-            return false;
-        };
-
-        if (key == Key::Return)
-        {
-            if (context().has_client())
-                context().client().menu_hide();
-            context().print_status(DisplayLine{});
-
-            // Maintain hooks disabled in callback if they were before pop_mode
-            ScopedSetBool disable_hooks(context().hooks_disabled(),
-                                        context().hooks_disabled());
-            pop_mode();
-            int selected = m_selected - m_choices.begin();
-            m_callback(selected, MenuEvent::Validate, context());
-            return;
-        }
-        else if (key == Key::Escape or key == ctrl('c'))
-        {
-            if (m_edit_filter)
-            {
-                m_edit_filter = false;
-                m_filter = Regex{".*"};
-                m_filter_editor.reset("", "");
-                context().print_status(DisplayLine{});
-            }
-            else
-            {
-                if (context().has_client())
-                    context().client().menu_hide();
-
-                // Maintain hooks disabled in callback if they were before pop_mode
-                ScopedSetBool disable_hooks(context().hooks_disabled(),
-                                            context().hooks_disabled());
-                pop_mode();
-                int selected = m_selected - m_choices.begin();
-                m_callback(selected, MenuEvent::Abort, context());
-            }
-        }
-        else if (key == Key::Down or key == Key::Tab or
-                 key == ctrl('n') or (not m_edit_filter and key == 'j'))
-        {
-            auto it = std::find_if(m_selected+1, m_choices.end(), match_filter);
-            if (it == m_choices.end())
-                it = std::find_if(m_choices.begin(), m_selected, match_filter);
-            select(it);
-        }
-        else if (key == Key::Up or key == shift(Key::Tab) or
-                 key == ctrl('p') or (not m_edit_filter and key == 'k'))
-        {
-            ChoiceList::const_reverse_iterator selected(m_selected+1);
-            auto it = std::find_if(selected+1, m_choices.rend(), match_filter);
-            if (it == m_choices.rend())
-                it = std::find_if(m_choices.rbegin(), selected, match_filter);
-            select(it.base()-1);
-        }
-        else if (key == '/' and not m_edit_filter)
-        {
-            m_edit_filter = true;
-        }
-        else if (m_edit_filter)
-        {
-            m_filter_editor.handle_key(key);
-
-            auto search = ".*" + m_filter_editor.line() + ".*";
-            m_filter = Regex{search};
-            auto it = std::find_if(m_selected, m_choices.end(), match_filter);
-            if (it == m_choices.end())
-                it = std::find_if(m_choices.begin(), m_selected, match_filter);
-            select(it);
-        }
-
-        if (m_edit_filter and context().has_client())
-        {
-            auto prompt = "filter:"_str;
-            auto width = context().client().dimensions().column - prompt.column_length();
-            auto display_line = m_filter_editor.build_display_line(width);
-            display_line.insert(display_line.begin(), { prompt, context().faces()["Prompt"] });
-            context().print_status(display_line);
-        }
-    }
-
-    DisplayLine mode_line() const override
-    {
-        return { "menu", context().faces()["StatusLineMode"] };
-    }
-
-    KeymapMode keymap_mode() const override { return KeymapMode::Menu; }
-
-    StringView name() const override { return "menu"; }
-
-private:
-    MenuCallback m_callback;
-
-    using ChoiceList = Vector<DisplayLine>;
-    const ChoiceList m_choices;
-    ChoiceList::const_iterator m_selected;
-
-    void select(ChoiceList::const_iterator it)
-    {
-        m_selected = it;
-        int selected = m_selected - m_choices.begin();
-        if (context().has_client())
-            context().client().menu_select(selected);
-        m_callback(selected, MenuEvent::Select, context());
-    }
-
-    Regex      m_filter = Regex{".*"};
-    bool       m_edit_filter = false;
-    LineEditor m_filter_editor;
-};
-
 static Optional<Codepoint> get_raw_codepoint(Key key)
 {
     if (auto cp = key.codepoint())
@@ -1048,6 +913,19 @@ public:
             m_idle_timer.set_next_date(Clock::now() + get_idle_timeout(context()));
     }
 
+    void refresh_ifn() override
+    {
+        bool explicit_completion_selected = m_current_completion != -1 and
+            (not m_prefix_in_completions or m_current_completion != m_completions.candidates.size() - 1);
+        if (not enabled() or (context().flags() & Context::Flags::Draft) or explicit_completion_selected)
+            return;
+
+        if (auto next_date = Clock::now() + get_idle_timeout(context());
+            next_date < m_idle_timer.next_date())
+            m_idle_timer.set_next_date(next_date);
+        m_refresh_completion_pending = true;
+    }
+
     void paste(StringView content) override
     {
         m_line_editor.insert(content);
@@ -1115,33 +993,33 @@ private:
             const String& line = m_line_editor.line();
             m_completions = completer(context(), flags, line,
                                       line.byte_count_to(m_line_editor.cursor_pos()));
+            if (not context().has_client())
+                return;
+            if (m_completions.candidates.empty())
+                return context().client().menu_hide();
+
+            show_completions();
             const bool menu = (bool)(m_completions.flags & Completions::Flags::Menu);
-            if (context().has_client())
+            if (menu)
+                context().client().menu_select(0);
+            auto prefix = line.substr(m_completions.start, m_completions.end - m_completions.start);
+            m_prefix_in_completions = not menu and not contains(m_completions.candidates, prefix);
+            if (m_prefix_in_completions)
             {
-                if (m_completions.candidates.empty())
-                    return context().client().menu_hide();
-
-                Vector<DisplayLine> items;
-                for (auto& candidate : m_completions.candidates)
-                    items.push_back({ candidate, {} });
-
-                const auto menu_style = (m_flags & PromptFlags::Search) ? MenuStyle::Search : MenuStyle::Prompt;
-                context().client().menu_show(items, {}, menu_style);
-
-                if (menu)
-                    context().client().menu_select(0);
-
-                auto prefix = line.substr(m_completions.start, m_completions.end - m_completions.start);
-                if (not menu and not contains(m_completions.candidates, prefix))
-                {
-                    m_current_completion = m_completions.candidates.size();
-                    m_completions.candidates.push_back(prefix.str());
-                    m_prefix_in_completions = true;
-                }
-                else
-                    m_prefix_in_completions = false;
+                m_current_completion = m_completions.candidates.size();
+                m_completions.candidates.push_back(prefix.str());
             }
         } catch (runtime_error&) {}
+    }
+
+    void show_completions()
+    {
+        Vector<DisplayLine> items;
+        for (auto& candidate : m_completions.candidates)
+            items.push_back({ candidate, {} });
+
+        const auto menu_style = (m_flags & PromptFlags::Search) ? MenuStyle::Search : MenuStyle::Prompt;
+        context().client().menu_show(std::move(items), {}, menu_style);
     }
 
     void clear_completions()
@@ -1163,18 +1041,31 @@ private:
         context().print_status(display_line);
     }
 
-    void on_enabled() override
+    void on_enabled(bool from_pop) override
     {
         display();
-        m_line_changed = true;
+        if (from_pop)
+        {
+            if (context().has_client() and not m_completions.candidates.empty())
+            {
+                show_completions();
+                const bool menu = (bool)(m_completions.flags & Completions::Flags::Menu);
+                if (m_current_completion != -1)
+                    context().client().menu_select(m_current_completion);
+                else if (menu)
+                    context().client().menu_select(0);
+            }
+        }
+        else
+            m_line_changed = true;
 
         if (not (context().flags() & Context::Flags::Draft))
             m_idle_timer.set_next_date(Clock::now() + get_idle_timeout(context()));
     }
 
-    void on_disabled(bool temporary) override
+    void on_disabled(bool from_push) override
     {
-        if (not temporary)
+        if (not from_push)
             context().print_status({});
 
         m_idle_timer.disable();
@@ -1274,17 +1165,17 @@ public:
         prepare(mode, count);
     }
 
-    void on_enabled() override
+    void on_enabled(bool from_pop) override
     {
         if (not (context().flags() & Context::Flags::Draft))
             m_idle_timer.set_next_date(Clock::now() + get_idle_timeout(context()));
     }
 
-    void on_disabled(bool temporary) override
+    void on_disabled(bool from_push) override
     {
         m_idle_timer.disable();
 
-        if (not temporary)
+        if (not from_push)
         {
             last_insert().recording.unset();
 
@@ -1625,7 +1516,7 @@ InputHandler::InputHandler(SelectionList selections, Context::Flags flags, Strin
     : m_context(*this, std::move(selections), flags, std::move(name))
 {
     m_mode_stack.emplace_back(new InputModes::Normal(*this));
-    current_mode().on_enabled();
+    current_mode().on_enabled(false);
 }
 
 InputHandler::~InputHandler() = default;
@@ -1636,7 +1527,7 @@ void InputHandler::push_mode(InputMode* new_mode)
 
     current_mode().on_disabled(true);
     m_mode_stack.emplace_back(new_mode);
-    new_mode->on_enabled();
+    new_mode->on_enabled(false);
 
     context().hooks().run_hook(Hook::ModeChange, format("push:{}:{}", prev_name, new_mode->name()), context());
 }
@@ -1651,7 +1542,7 @@ void InputHandler::pop_mode(InputMode* mode)
 
     current_mode().on_disabled(false);
     m_mode_stack.pop_back();
-    current_mode().on_enabled();
+    current_mode().on_enabled(true);
 
     context().hooks().run_hook(Hook::ModeChange, format("pop:{}:{}", prev_name, current_mode().name()), context());
 }
@@ -1714,11 +1605,6 @@ void InputHandler::set_prompt_face(Face prompt_face)
 {
     if (auto* prompt = dynamic_cast<InputModes::Prompt*>(&current_mode()))
         prompt->set_prompt_face(prompt_face);
-}
-
-void InputHandler::menu(Vector<DisplayLine> choices, MenuCallback callback)
-{
-    push_mode(new InputModes::Menu(*this, std::move(choices), std::move(callback)));
 }
 
 void InputHandler::on_next_key(StringView mode_name, KeymapMode keymap_mode, KeyCallback callback,
@@ -1797,6 +1683,11 @@ void InputHandler::handle_key(Key key)
         m_recording_reg = 0;
         m_recording_level = -1;
     }
+}
+
+void InputHandler::refresh_ifn()
+{
+    current_mode().refresh_ifn();
 }
 
 void InputHandler::start_recording(char reg)

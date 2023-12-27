@@ -27,6 +27,11 @@ public:
     constexpr ArrayView(T* begin, T* end)
         : m_pointer(begin), m_size(end - begin) {}
 
+    template<typename It>
+        requires std::contiguous_iterator<It> and std::is_same_v<std::iter_value_t<It>, T>
+    constexpr ArrayView(It begin, It end)
+        : m_pointer(&*begin), m_size(end - begin) {}
+
     template<size_t N>
     constexpr ArrayView(T(&array)[N]) : m_pointer(array), m_size(N) {}
 
@@ -68,6 +73,10 @@ private:
     size_t m_size;
 };
 
+template<typename It>
+    requires std::contiguous_iterator<It>
+ArrayView(It begin, It end) -> ArrayView<std::iter_value_t<It>>;
+
 template<typename T>
 using ConstArrayView = ArrayView<const T>;
 
@@ -82,12 +91,6 @@ bool operator==(ArrayView<T> lhs, ArrayView<T> rhs)
             return false;
     }
     return true;
-}
-
-template<typename T>
-bool operator!=(ArrayView<T> lhs, ArrayView<T> rhs)
-{
-    return not (lhs == rhs);
 }
 
 }

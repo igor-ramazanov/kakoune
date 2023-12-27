@@ -49,7 +49,6 @@ private:
     BufferCoord m_anchor;
     BufferCoordAndTarget m_cursor;
 };
-;
 
 struct Selection : BasicSelection
 {
@@ -127,7 +126,6 @@ struct SelectionList
     size_t size() const { return m_selections.size(); }
 
     bool operator==(const SelectionList& other) const { return m_buffer == other.m_buffer and m_selections == other.m_selections; }
-    bool operator!=(const SelectionList& other) const { return not ((*this) == other); }
 
     void sort();
     void merge_overlapping();

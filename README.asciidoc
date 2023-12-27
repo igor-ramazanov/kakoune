@@ -539,8 +539,10 @@ Changes
 
  * `u`: undo last change
  * `<c-k>`: move backward in history
+ * `<a-u>`: undo selection changes
  * `U`: redo last change
  * `<c-j>`: move forward in history
+ * `<a-U>`: redo selection changes
 
  * `&`: align selections, align the cursor of selections by inserting
         spaces before the first character of the selection
@@ -876,15 +878,6 @@ FIFO buffers are very useful for running some commands asynchronously while
 progressively displaying their result in Kakoune.
 
 See <<doc/pages/buffers#fifo-buffers,`:doc buffers fifo-buffers`>>.
-
-Menus
-~~~~~
-
-When a menu is displayed, you can use `j`, `<c-n>` or `<tab>` to select the next
-entry, and `k`, `<c-p>` or `<shift-tab>` to select the previous one.
-
-Using the `/` key, you can enter some regex in order to restrict available choices
-to the matching ones.
 
 Credits
 -------

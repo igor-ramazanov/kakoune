@@ -34,30 +34,21 @@ struct WordSplitter
             const auto* end = m_splitter->m_content.end();
             auto extra_chars = m_splitter->m_extra_word_chars;
 
-            while (true)
+            do
             {
-                m_word_begin = m_word_end;
-                while (m_word_begin != end and not is_word(utf8::codepoint(m_word_begin, end), extra_chars))
-                    utf8::to_next(m_word_begin, end);
-                m_word_end = m_word_begin;
-                CharCount word_len = 0;
-                while (m_word_end != end and is_word(utf8::codepoint(m_word_end, end), extra_chars))
-                {
-                    utf8::to_next(m_word_end, end);
-                    ++word_len;
-                }
-                if (m_word_begin == end or word_len < WordDB::max_word_len)
-                    break;
-            }
+                auto it = m_word_begin = m_word_end;
+                while (it != end and not is_word(utf8::read_codepoint(it, end), extra_chars))
+                    m_word_begin = it;
+
+                m_word_end = it;
+                while (it != end and is_word(utf8::read_codepoint(it, end), extra_chars))
+                    m_word_end = it;
+            } while (m_word_begin != end and (m_word_end - m_word_begin) > WordDB::max_word_len);
 
             return *this;
         }
 
-        friend bool operator==(const Iterator& lhs, const Iterator& rhs)
-        { return lhs.m_word_begin == rhs.m_word_begin and lhs.m_word_end == rhs.m_word_end; }
-
-        friend bool operator!=(const Iterator& lhs, const Iterator& rhs)
-        { return not (lhs == rhs); }
+        friend bool operator==(const Iterator& lhs, const Iterator& rhs) = default;
 
         const char* m_word_begin;
         const char* m_word_end;
@@ -80,14 +71,15 @@ void WordDB::add_words(StringView line, ConstArrayView<Codepoint> extra_word_cha
 {
     for (auto&& w : WordSplitter{line, extra_word_chars})
     {
-        auto it = m_words.find(w);
-        if (it != m_words.end())
-            ++it->value.refcount;
+        auto hash = hash_value(w);
+        auto index = m_words.find_index(w, hash);
+        if (index >= 0)
+            ++m_words.item(index).value.refcount;
         else
         {
-            auto word = intern(w);
+            auto word = intern(w, hash);
             auto view = word->strview();
-            m_words.insert({view, {std::move(word), used_letters(view), 1}});
+            m_words.insert({view, {std::move(word), used_letters(view), 1}}, hash);
         }
     }
 }

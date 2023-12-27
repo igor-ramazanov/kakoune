@@ -23,9 +23,6 @@ The *map* command makes *key* behave as if the *keys* sequence was typed.
     *prompt*::
         prompts, such as when entering a command through *:*, or a regex through */*
 
-    *menu*::
-        mode entered when a menu is displayed with the 'menu' command
-
     *user*::
         mode entered when the user prefix is hit (default: '<space>')
 
@@ -73,7 +70,9 @@ map global normal = ':echo Got count %val{count} and reg %val{register}<ret>'
 
 == Mappable keys
 
-See <<keys#,`:doc keys`>> to discover the list of default bindings.
+See <<keys#,`:doc keys`>> to learn what each key does in each mode. The keys on
+the right-hand side of the mapping are not affected by other mappings, they
+always perform their original function.
 
 For *key* and *keys* in the *map* command, the following key names can
 be used:

@@ -1,6 +1,18 @@
 declare-option -docstring "name of the client in which documentation is to be displayed" \
     str docsclient
 
+declare-option -docstring "git diff added character" \
+    str git_diff_add_char "▏"
+
+declare-option -docstring "git diff modified character" \
+    str git_diff_mod_char "▏"
+
+declare-option -docstring "git diff deleted character" \
+    str git_diff_del_char "_"
+
+declare-option -docstring "git diff top deleted character" \
+    str git_diff_top_char "‾"
+
 hook -group git-log-highlight global WinSetOption filetype=git-log %{
     require-module diff
     add-highlighter window/git-log group
@@ -49,32 +61,56 @@ define-command -params 1.. \
         All the optional arguments are forwarded to the git utility
         Available commands:
             add
-            rm
-            reset
+            apply (alias for "patch git apply")
             blame
-            commit
             checkout
+            commit
             diff
+            edit
+            grep
             hide-blame
             hide-diff
             init
             log
             next-hunk
             prev-hunk
+            reset
+            rm
             show
             show-branch
             show-diff
             status
             update-diff
-            grep
     } -shell-script-candidates %{
     if [ $kak_token_to_complete -eq 0 ]; then
-        printf "add\nrm\nreset\nblame\ncommit\ncheckout\ndiff\nhide-blame\nhide-diff\nlog\nnext-hunk\nprev-hunk\nshow\nshow-branch\nshow-diff\ninit\nstatus\nupdate-diff\ngrep\n"
+        printf %s\\n \
+            apply \
+            blame \
+            checkout \
+            commit \
+            diff \
+            edit \
+            grep \
+            hide-blame \
+            hide-diff \
+            init \
+            log \
+            next-hunk \
+            prev-hunk \
+            reset \
+            rm \
+            show \
+            show-branch \
+            show-diff \
+            status \
+            update-diff \
+        ;
     else
         case "$1" in
             commit) printf -- "--amend\n--no-edit\n--all\n--reset-author\n--fixup\n--squash\n"; git ls-files -m ;;
             add) git ls-files -dmo --exclude-standard ;;
-            rm|grep) git ls-files -c ;;
+            apply) printf -- "--reverse\n--cached\n--index\n" ;;
+            grep|edit) git ls-files -c --recurse-submodules ;;
         esac
     fi
   } \
@@ -95,7 +131,7 @@ define-command -params 1.. \
            diff) map_diff_goto_source=true; filetype=diff ;;
            show) map_diff_goto_source=true; filetype=git-log ;;
            show-branch) filetype=git-show-branch ;;
-           log)  filetype=git-log ;;
+           log)  map_diff_goto_source=true; filetype=git-log ;;
            status)  filetype=git-status ;;
            *) return 1 ;;
         esac
@@ -124,34 +160,35 @@ define-command -params 1.. \
                       try %{ add-highlighter window/git-blame flag-lines Information git_blame_flags }
                       set-option buffer=$kak_bufname git_blame_flags '$kak_timestamp'
                   }" | kak -p ${kak_session}
-                  git blame "$@" --incremental ${kak_buffile} | awk '
-                  function send_flags(flush,    text, i) {
-                      if (line == "") { return; }
-                      text=substr(sha,1,8) " " dates[sha] " " authors[sha]
-                      # gsub("|", "\\|", text)
-                      gsub("~", "~~", text)
-                      for ( i=0; i < count; i++ ) {
-                          flags = flags " %~" line+i "|" text "~"
+                  git blame "$@" --incremental ${kak_buffile} | perl -wne '
+                  use POSIX qw(strftime);
+                  sub send_flags {
+                      my $flush = shift;
+                      if (not defined $line) { return; }
+                      my $text = substr($sha,1,8) . " " . $dates{$sha} . " " . $authors{$sha};
+                      $text =~ s/~/~~/g;
+                      for ( my $i = 0; $i < $count; $i++ ) {
+                          $flags .= " %~" . ($line+$i) . "|$text~";
                       }
-                      now = systime()
+                      $now = time();
                       # Send roughly one update per second, to avoid creating too many kak processes.
-                      if (!flush && now - last_sent < 1) {
+                      if (!$flush && defined $last_sent && $now - $last_sent < 1) {
                           return
                       }
-                      cmd = "kak -p " ENVIRON["kak_session"]
-                      print "set-option -add buffer=" ENVIRON["kak_bufname"] " git_blame_flags " flags | cmd
-                      close(cmd)
-                      flags = ""
-                      last_sent = now
+                      open CMD, "|-", "kak -p $ENV{kak_session}";
+                      print CMD "set-option -add buffer=$ENV{kak_bufname} git_blame_flags $flags";
+                      close(CMD);
+                      $flags = "";
+                      $last_sent = $now;
                   }
-                  /^([0-9a-f]+) ([0-9]+) ([0-9]+) ([0-9]+)/ {
-                      send_flags(0)
-                      sha=$1
-                      line=$3
-                      count=$4
+                  if (m/^([0-9a-f]+) ([0-9]+) ([0-9]+) ([0-9]+)/) {
+                      send_flags(0);
+                      $sha = $1;
+                      $line = $3;
+                      $count = $4;
                   }
-                  /^author / { authors[sha]=substr($0,8) }
-                  /^author-time ([0-9]*)/ { dates[sha]=strftime("%F %T", $2) }
+                  if (m/^author /) { $authors{$sha} = substr($_,7) }
+                  if (m/^author-time ([0-9]*)/) { $dates{$sha} = strftime("%F %T", localtime $1) }
                   END { send_flags(1); }'
         ) > /dev/null 2>&1 < /dev/null &
     }
@@ -168,7 +205,12 @@ define-command -params 1.. \
         (
             cd_bufdir
             git --no-pager diff --no-ext-diff -U0 "$kak_buffile" | perl -e '
+            use utf8;
             $flags = $ENV{"kak_timestamp"};
+            $add_char = $ENV{"kak_opt_git_diff_add_char"};
+            $del_char = $ENV{"kak_opt_git_diff_del_char"};
+            $top_char = $ENV{"kak_opt_git_diff_top_char"};
+            $mod_char = $ENV{"kak_opt_git_diff_mod_char"};
             foreach $line (<STDIN>) {
                 if ($line =~ /@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))?/) {
                     $from_line = $1;
@@ -179,39 +221,39 @@ define-command -params 1.. \
                     if ($from_count == 0 and $to_count > 0) {
                         for $i (0..$to_count - 1) {
                             $line = $to_line + $i;
-                            $flags .= " $line|\{green\}+";
+                            $flags .= " $line|\{green\}$add_char";
                         }
                     }
                     elsif ($from_count > 0 and $to_count == 0) {
                         if ($to_line == 0) {
-                            $flags .= " 1|\{red\}‾";
+                            $flags .= " 1|\{red\}$top_char";
                         } else {
-                            $flags .= " $to_line|\{red\}_";
+                            $flags .= " $to_line|\{red\}$del_char";
                         }
                     }
                     elsif ($from_count > 0 and $from_count == $to_count) {
                         for $i (0..$to_count - 1) {
                             $line = $to_line + $i;
-                            $flags .= " $line|\{blue\}~";
+                            $flags .= " $line|\{blue\}$mod_char";
                         }
                     }
                     elsif ($from_count > 0 and $from_count < $to_count) {
                         for $i (0..$from_count - 1) {
                             $line = $to_line + $i;
-                            $flags .= " $line|\{blue\}~";
+                            $flags .= " $line|\{blue\}$mod_char";
                         }
                         for $i ($from_count..$to_count - 1) {
                             $line = $to_line + $i;
-                            $flags .= " $line|\{green\}+";
+                            $flags .= " $line|\{green\}$add_char";
                         }
                     }
                     elsif ($to_count > 0 and $from_count > $to_count) {
                         for $i (0..$to_count - 2) {
                             $line = $to_line + $i;
-                            $flags .= " $line|\{blue\}~";
+                            $flags .= " $line|\{blue\}$mod_char";
                         }
                         $last = $to_line + $to_count - 1;
-                        $flags .= " $last|\{blue+u\}~";
+                        $flags .= " $last|\{blue+u\}$mod_char";
                     }
                 }
             }
@@ -309,6 +351,12 @@ define-command -params 1.. \
     }
 
     case "$1" in
+        apply)
+            shift
+            enquoted="$(printf '"%s" ' "$@")"
+            echo "require-module patch"
+            echo "patch git apply $enquoted"
+            ;;
         show|show-branch|log|diff|status)
             show_git_cmd_output "$@"
             ;;
@@ -356,6 +404,11 @@ define-command -params 1.. \
                 grep $enquoted
                 set-option current grepcmd '$kak_opt_grepcmd'
             }"
+            ;;
+        edit)
+            shift
+            enquoted="$(printf '"%s" ' "$@")"
+            printf %s "edit -existing -- $enquoted"
             ;;
         *)
             printf "fail unknown git command '%s'\n" "$1"

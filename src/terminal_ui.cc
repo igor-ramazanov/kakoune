@@ -30,8 +30,8 @@ static String fix_atom_text(StringView str)
     auto pos = str.begin();
     for (auto it = str.begin(), end = str.end(); it != end; ++it)
     {
-        char c = *it;
-        if (c >= 0 and c <= 0x1F)
+        unsigned char c = *it;
+        if (c <= 0x1F)
         {
             res += StringView{pos, it};
             res += String{Codepoint{(uint32_t)(0x2400 + c)}};
@@ -68,8 +68,7 @@ struct TerminalUI::Window::Line
             text.resize(it - text.begin(), 0);
         }
 
-        friend bool operator==(const Atom& lhs, const Atom& rhs) { return lhs.text == rhs.text and lhs.skip == rhs.skip and lhs.face == rhs.face; }
-        friend bool operator!=(const Atom& lhs, const Atom& rhs) { return not (lhs == rhs); }
+        friend bool operator==(const Atom& lhs, const Atom& rhs) = default;
         friend size_t hash_value(const Atom& atom) { return hash_values(atom.text, atom.skip, atom.face); }
     };
 
@@ -1473,7 +1472,6 @@ void TerminalUI::setup_terminal()
         "\033[22t"    // save the current window title
         "\033[?25l"   // hide cursor
         "\033="       // set application keypad mode, so the keypad keys send unique codes
-        "\033[?2026$p" // query support for synchronize output
         "\033[?2004h" // force enable bracketed-paste events
     );
 }
@@ -1543,6 +1541,10 @@ void TerminalUI::set_ui_options(const Options& options)
     auto synchronized = find("terminal_synchronized").map(to_bool);
     m_synchronized.set = (bool)synchronized;
     m_synchronized.requested = synchronized.value_or(false);
+    if (not m_synchronized.queried and not m_synchronized.set) {
+        write(STDOUT_FILENO, "\033[?2026$p");
+        m_synchronized.queried = true;
+    }
 
     m_shift_function_key = find("terminal_shift_function_key").map(str_to_int_ifp).value_or(default_shift_function_key);
 

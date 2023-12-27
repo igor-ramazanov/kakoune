@@ -80,7 +80,7 @@ struct PerArgumentCommandCompleter<Completer, Rest...> : PerArgumentCommandCompl
 
     Completions operator()(const Context& context, CompletionFlags flags,
                            CommandParameters params, size_t token_to_complete,
-                           ByteCount pos_in_token) const
+                           ByteCount pos_in_token)
     {
         if (token_to_complete == 0)
         {
@@ -280,56 +280,91 @@ struct ShellCandidatesCompleter
                              Completions::Flags flags = Completions::Flags::None)
       : m_shell_script{std::move(shell_script)}, m_flags(flags) {}
 
+    ShellCandidatesCompleter(const ShellCandidatesCompleter& other) : m_shell_script{other.m_shell_script}, m_flags(other.m_flags) {}
+    ShellCandidatesCompleter& operator=(const ShellCandidatesCompleter& other) {  m_shell_script = other.m_shell_script; m_flags = other.m_flags; return *this; }
+
     Completions operator()(const Context& context, CompletionFlags flags,
                            CommandParameters params, size_t token_to_complete,
                            ByteCount pos_in_token)
     {
-        if (flags & CompletionFlags::Start)
-            m_token = -1;
-
-        if (m_token != token_to_complete)
+        if (m_last_token != token_to_complete)
         {
             ShellContext shell_context{
                 params,
                 { { "token_to_complete", to_string(token_to_complete) } }
             };
-            String output = ShellManager::instance().eval(m_shell_script, context, {},
-                                                          ShellManager::Flags::WaitForStdout,
-                                                          shell_context).first;
+            m_running_script.emplace(ShellManager::instance().spawn(m_shell_script, context, false, shell_context));
+            m_watcher.emplace((int)m_running_script->out, FdEvents::Read, EventMode::Urgent,
+                              [this, &input_handler=context.input_handler()](auto&&... args) { read_candidates(input_handler); });
             m_candidates.clear();
-            for (auto c : output | split<StringView>('\n')
-                                 | filter([](auto s) { return not s.empty(); }))
-                m_candidates.emplace_back(c.str(), used_letters(c));
-            m_token = token_to_complete;
+            m_last_token = token_to_complete;
+        }
+        return rank_candidates(params[token_to_complete].substr(0, pos_in_token));
+    }
+
+private:
+    void read_candidates(InputHandler& input_handler)
+    {
+        char buffer[2048];
+        bool closed = false;
+        int fd = (int)m_running_script->out;
+        while (fd_readable(fd))
+        {
+            int size = read(fd, buffer, sizeof(buffer));
+            if (size == 0)
+            {
+                closed = true;
+                break;
+            }
+            m_stdout_buffer.insert(m_stdout_buffer.end(), buffer, buffer + size);
         }
 
-        StringView query = params[token_to_complete].substr(0, pos_in_token);
+        auto end = closed ? m_stdout_buffer.end() : find(m_stdout_buffer | reverse(), '\n').base();
+        for (auto c : ArrayView(m_stdout_buffer.begin(), end) | split<StringView>('\n')
+                                                              | filter([](auto s) { return not s.empty(); }))
+            m_candidates.emplace_back(c.str(), used_letters(c));
+        m_stdout_buffer.erase(m_stdout_buffer.begin(), end);
+
+        input_handler.refresh_ifn();
+        if (not closed)
+            return;
+
+        m_running_script.reset();
+        m_watcher.reset();
+    }
+
+    Completions rank_candidates(StringView query)
+    {
         UsedLetters query_letters = used_letters(query);
         Vector<RankedMatch> matches;
-        for (const auto& candidate : m_candidates)
+        for (auto&& [i, candidate] : m_candidates | enumerate())
         {
-            if (RankedMatch match{candidate.first, candidate.second, query, query_letters})
-                matches.push_back(match);
+            if (RankedMatch m{candidate.first, candidate.second, query, query_letters})
+            {
+                m.set_input_sequence_number(i);
+                matches.push_back(m);
+            }
         }
 
         constexpr size_t max_count = 100;
         CandidateList res;
         // Gather best max_count matches
-        for_n_best(matches, max_count, [](auto& lhs, auto& rhs) { return rhs < lhs; },
-                   [&] (const RankedMatch& m) {
+        for_n_best(matches, max_count, [](auto& lhs, auto& rhs) { return rhs < lhs; }, [&] (const RankedMatch& m) {
             if (not res.empty() and res.back() == m.candidate())
                 return false;
             res.push_back(m.candidate().str());
             return true;
         });
 
-        return Completions{0_byte, pos_in_token, std::move(res), m_flags};
+        return Completions{0_byte, query.length(), std::move(res), m_flags};
     }
 
-private:
     String m_shell_script;
+    Vector<char, MemoryDomain::Completion> m_stdout_buffer;
+    Optional<Shell> m_running_script;
+    Optional<FDWatcher> m_watcher;
     Vector<std::pair<String, UsedLetters>, MemoryDomain::Completion> m_candidates;
-    int m_token = -1;
+    int m_last_token = -1;
     Completions::Flags m_flags;
 };
 
@@ -1140,11 +1175,7 @@ const CommandDesc add_hook_cmd = {
     },
     CommandFlags::None,
     CommandHelper{},
-    make_completer(menu(complete_scope), menu(complete_hooks), complete_nothing,
-                   [](const Context& context, CompletionFlags flags,
-                      StringView prefix, ByteCount cursor_pos)
-                   { return CommandManager::instance().complete(
-                         context, flags, prefix, cursor_pos); }),
+    make_completer(menu(complete_scope), menu(complete_hooks), complete_nothing, CommandManager::Completer{}),
     [](const ParametersParser& parser, Context& context, const ShellContext&)
     {
         auto descs = enum_desc(Meta::Type<Hook>{});
@@ -1270,15 +1301,7 @@ CommandCompleter make_command_completer(StringView type, StringView param, Compl
         return ShellCandidatesCompleter{param.str(), completions_flags};
     }
     else if (type == "command")
-    {
-        return [](const Context& context, CompletionFlags flags,
-                  CommandParameters params,
-                  size_t token_to_complete, ByteCount pos_in_token)
-        {
-            return CommandManager::instance().complete(
-                context, flags, params, token_to_complete, pos_in_token);
-        };
-    }
+        return CommandManager::NestedCompleter{};
     else if (type == "shell")
     {
         return [=](const Context& context, CompletionFlags flags,
@@ -2161,7 +2184,7 @@ const CommandDesc evaluate_commands_cmd = {
             ScopedSetBool disable_hooks(context.hooks_disabled(), no_hooks);
 
             if (parser.get_switch("verbatim"))
-                CommandManager::instance().execute_single_command(parser | gather<Vector>(), context, shell_context);
+                CommandManager::instance().execute_single_command(parser | gather<Vector<String>>(), context, shell_context);
             else
                 CommandManager::instance().execute(join(parser, ' ', false), context, shell_context);
         });
@@ -2250,65 +2273,6 @@ const CommandDesc prompt_cmd = {
                     context.print_status({error.what().str(), context.faces()["Error"]});
                     context.hooks().run_hook(Hook::RuntimeError, error.what(), context);
                 }
-            });
-    }
-};
-
-const CommandDesc menu_cmd = {
-    "menu",
-    nullptr,
-    "menu [<switches>] <name1> <commands1> <name2> <commands2>...: display a "
-    "menu and execute commands for the selected item",
-    ParameterDesc{
-        { { "auto-single", { {}, "instantly validate if only one item is available" } },
-          { "select-cmds", { {}, "each item specify an additional command to run when selected" } },
-          { "markup", { {}, "parse menu entries as markup text" } } }
-    },
-    CommandFlags::None,
-    CommandHelper{},
-    CommandCompleter{},
-    [](const ParametersParser& parser, Context& context, const ShellContext& shell_context)
-    {
-        const bool with_select_cmds = (bool)parser.get_switch("select-cmds");
-        const bool markup = (bool)parser.get_switch("markup");
-        const size_t modulo = with_select_cmds ? 3 : 2;
-
-        const size_t count = parser.positional_count();
-        if (count == 0 or (count % modulo) != 0)
-            throw wrong_argument_count();
-
-        if (count == modulo and parser.get_switch("auto-single"))
-        {
-            ScopedSetBool noninteractive{context.noninteractive()};
-
-            CommandManager::instance().execute(parser[1], context);
-            return;
-        }
-
-        Vector<DisplayLine> choices;
-        Vector<String> commands;
-        Vector<String> select_cmds;
-        for (int i = 0; i < count; i += modulo)
-        {
-            if (parser[i].empty())
-                throw runtime_error(format("entry #{} is empty", i+1));
-
-            choices.push_back(markup ? parse_display_line(parser[i], context.faces())
-                                     : DisplayLine{ parser[i], {} });
-            commands.push_back(parser[i+1]);
-            if (with_select_cmds)
-                select_cmds.push_back(parser[i+2]);
-        }
-
-        CapturedShellContext sc{shell_context};
-        context.input_handler().menu(std::move(choices),
-            [=](int choice, MenuEvent event, Context& context) {
-                ScopedSetBool noninteractive{context.noninteractive()};
-
-                if (event == MenuEvent::Validate and choice >= 0 and choice < commands.size())
-                  CommandManager::instance().execute(commands[choice], context, sc);
-                if (event == MenuEvent::Select and choice >= 0 and choice < select_cmds.size())
-                  CommandManager::instance().execute(select_cmds[choice], context, sc);
             });
     }
 };
@@ -2800,7 +2764,6 @@ void register_commands()
     register_command(execute_keys_cmd);
     register_command(evaluate_commands_cmd);
     register_command(prompt_cmd);
-    register_command(menu_cmd);
     register_command(on_key_cmd);
     register_command(info_cmd);
     register_command(try_catch_cmd);

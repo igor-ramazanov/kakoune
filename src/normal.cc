@@ -193,6 +193,8 @@ String build_autoinfo_for_mapping(const Context& context, KeymapMode mode,
     for (auto& key : keymaps.get_mapped_keys(mode))
     {
         const String& docstring = keymaps.get_mapping_docstring(key, mode);
+        if (keymaps.get_mapping_keys(key, mode).empty() and docstring.empty())
+            continue;
         if (auto it = find_if(descs, [&](auto& elem) { return elem.second == docstring; });
             it != descs.end())
             it->first += ',' + to_string(key);
@@ -471,17 +473,15 @@ void command(const Context& context, EnvVarMap env_vars, char reg = 0)
     if (not CommandManager::has_instance())
         throw runtime_error{"commands are not supported"};
 
-    CommandManager::instance().clear_last_complete_command();
-
     String default_command = context.main_sel_register_value(reg ? reg : ':').str();
 
     context.input_handler().prompt(
         ":", {}, default_command,
         context.faces()["Prompt"], PromptFlags::DropHistoryEntriesWithBlankPrefix,
         ':',
-        [](const Context& context, CompletionFlags flags,
-           StringView cmd_line, ByteCount pos) {
-               return CommandManager::instance().complete(context, flags, cmd_line, pos);
+        [completer=CommandManager::Completer{}](const Context& context, CompletionFlags flags,
+           StringView cmd_line, ByteCount pos) mutable {
+               return completer(context, flags, cmd_line, pos);
         },
         [env_vars = std::move(env_vars), default_command](StringView cmdline, PromptEvent event, Context& context) {
             if (context.has_client())
@@ -853,23 +853,24 @@ void regex_prompt(Context& context, String prompt, char reg, T func)
                         context.window().set_position(position);
 
                     context.input_handler().set_prompt_face(context.faces()["Prompt"]);
+                    RegisterManager::instance()[reg].restore(context, saved_reg);
                 }
+
                 switch (event)
                 {
-                    case PromptEvent::Change:
-                        if (not incsearch or str.empty())
-                            return;
+                case PromptEvent::Abort: return;
+                case PromptEvent::Change:
+                    if (not incsearch)
+                        return;
+                    if (not str.empty())
                         RegisterManager::instance()[reg].set(context, str.str());
-                        func(Regex{str, direction_flags(mode)}, event, context);
-                        return;
-                    case PromptEvent::Abort:
-                        RegisterManager::instance()[reg].restore(context, saved_reg);
-                        return;
-                    case PromptEvent::Validate:
-                        context.push_jump();
-                        func(Regex{str.empty() ? default_regex : str, direction_flags(mode)}, event, context);
-                        return;
+                    break;
+                case PromptEvent::Validate:
+                    RegisterManager::instance()[reg].set(context, str.str());
+                    context.push_jump();
+                    break;
                 }
+                func(Regex{str.empty() ? default_regex : str, direction_flags(mode)}, event, context);
             }
             catch (regex_error& err)
             {
@@ -999,7 +1000,7 @@ void use_selection_as_search_pattern(Context& context, NormalParams params)
                       smart and is_bow(buffer, beg) ? "\\b" : "",
                       escape(buffer.string(beg, end), "^$\\.*+?()[]{}|", '\\'),
                       smart and is_eow(buffer, end) ? "\\b" : "");
-    }) | gather<HashSet>();
+    }) | gather<HashSet<String>>();
     String pattern = join(patterns, '|', false);
 
     const char reg = to_lower(params.reg ? params.reg : '/');
